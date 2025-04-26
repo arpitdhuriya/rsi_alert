@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import time
 import threading
 
+
 # Configuration
 DEFAULT_STOCKS = yahoo_symbols = [
     "ABSLBANETF.NS",
@@ -140,7 +141,10 @@ PERIOD = '5d'  # Data period (5 days should be enough for RSI calculation)
 RSI_PERIOD = 14  # Typical RSI period
 RSI_THRESHOLD = 30  # Alert when RSI goes below this value
 CHECK_INTERVAL = 60  # Check every 60 seconds for demo purposes (change to 3600 for hourly)
-
+# Sound configuration
+ALERT_SOUND_FILE = 'alert.wav'  # Provide path to your sound file
+BEEP_FREQUENCY = 1000  # Frequency in Hz (for Windows beep)
+BEEP_DURATION = 1000  # Duration in ms (for Windows beep)
 
 def initialize_session_state():
     """Initialize all session state variables"""
@@ -180,6 +184,13 @@ def calculate_rsi(data, window=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
+def play_alert_sound():
+    """Play system alert sound using cross-platform methods"""
+    try:
+        import os
+        os.system('osascript -e "beep"')
+    except:
+        print('\a', end='', flush=True)  # Fallback to terminal bell
 
 
 def update_stock_data(symbol):
@@ -204,6 +215,7 @@ def update_stock_data(symbol):
 
         # Check for alert condition
         if latest_rsi < RSI_THRESHOLD:
+            play_alert_sound()
             alert_exists = any(
                 alert['symbol'] == symbol and
                 (current_time - alert['time']) < timedelta(hours=24)
