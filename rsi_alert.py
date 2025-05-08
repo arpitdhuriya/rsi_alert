@@ -4,10 +4,11 @@ import streamlit as st
 from datetime import datetime, timedelta
 import time
 import threading
-
-
+import platform
+import subprocess
+import random
 # Configuration
-DEFAULT_STOCKS = yahoo_symbols = [
+DEFAULT_STOCKS = [
     "ABSLBANETF.NS",
     "ABSLNN50ET.NS",
     "ALPHA.NS",
@@ -119,7 +120,7 @@ DEFAULT_STOCKS = yahoo_symbols = [
     "SETFGOLD.NS",
     "SETFNIF50.NS",
     "SETFNIFBK.NS",
-    "SETFNN50.NS",
+    "SETFNNF50.NS",
     "SILVER.NS",
     "SILVERADD.NS",
     "SILVERBEES.NS",
@@ -136,15 +137,72 @@ DEFAULT_STOCKS = yahoo_symbols = [
     "UTINIFTETF.NS",
     "UTISENSETF.NS"
 ]
-INTERVAL = '60m'  # 60 minutes (1 hour)
-PERIOD = '5d'  # Data period (5 days should be enough for RSI calculation)
-RSI_PERIOD = 14  # Typical RSI period
-RSI_THRESHOLD = 30  # Alert when RSI goes below this value
-CHECK_INTERVAL = 60  # Check every 60 seconds for demo purposes (change to 3600 for hourly)
-# Sound configuration
-ALERT_SOUND_FILE = 'alert.wav'  # Provide path to your sound file
-BEEP_FREQUENCY = 1000  # Frequency in Hz (for Windows beep)
-BEEP_DURATION = 1000  # Duration in ms (for Windows beep)
+INTERVAL = '60m'
+PERIOD = '5d'
+RSI_PERIOD = 14
+RSI_THRESHOLD = 30
+CHECK_INTERVAL = 300  # 5 minutes between full checks
+REQUEST_DELAY = 2  # 2 seconds between individual stock requests
+MAX_RETRIES = 3  # Max retries for failed requests
+
+
+def get_stock_data(symbol, period, interval, retry_count=0):
+    """Fetch stock data from Yahoo Finance with retry logic"""
+    try:
+        # Random delay to avoid appearing as a bot
+        time.sleep(REQUEST_DELAY + random.uniform(0, 1))
+
+        stock = yf.Ticker(symbol)
+        df = stock.history(period=period, interval=interval)
+
+        if df is None or df.empty:
+            if retry_count < MAX_RETRIES:
+                time.sleep(5)  # Longer delay before retry
+                return get_stock_data(symbol, period, interval, retry_count + 1)
+            st.error(f"No data available for {symbol} after {MAX_RETRIES} retries")
+            return None
+
+        return df
+
+    except Exception as e:
+        if "Too Many Requests" in str(e) and retry_count < MAX_RETRIES:
+            wait_time = 10 * (retry_count + 1)  # Exponential backoff
+            st.warning(f"Rate limited. Waiting {wait_time} seconds before retry...")
+            time.sleep(wait_time)
+            return get_stock_data(symbol, period, interval, retry_count + 1)
+
+        st.error(f"Error fetching data for {symbol}: {e}")
+        return None
+
+
+def monitoring_thread(stock_list):
+    """Thread function for continuous monitoring with better rate limiting"""
+    while st.session_state.monitor_active:
+        success_count = 0
+        current_time = datetime.now()
+
+        # Shuffle the list to avoid always hitting the same stocks first
+        random.shuffle(stock_list)
+
+        for symbol in stock_list:
+            if not st.session_state.monitor_active:
+                break
+
+            if update_stock_data(symbol):
+                success_count += 1
+
+            # Small delay between stocks
+            time.sleep(REQUEST_DELAY + random.uniform(0, 0.5))
+
+        if success_count > 0:
+            st.session_state.last_update = current_time.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Wait for next check interval
+        wait_time = CHECK_INTERVAL
+        while wait_time > 0 and st.session_state.monitor_active:
+            time.sleep(min(10, wait_time))  # Check every 10 seconds if we should stop
+            wait_time -= 10
+
 
 def initialize_session_state():
     """Initialize all session state variables"""
@@ -160,38 +218,41 @@ def initialize_session_state():
         st.session_state.first_run = True
 
 
-def get_stock_data(symbol, period, interval):
-    """Fetch stock data from Yahoo Finance"""
-    try:
-        stock = yf.Ticker(symbol)
-        df = stock.history(period=period, interval=interval)
-        return df
-    except Exception as e:
-        st.error(f"Error fetching data for {symbol}: {e}")
-        return None
-
 
 def calculate_rsi(data, window=14):
     """Calculate RSI for given data"""
     delta = data['Close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    # Separate gains and losses
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
 
+    # Calculate initial average gains and losses
     avg_gain = gain.rolling(window=window).mean()
     avg_loss = loss.rolling(window=window).mean()
 
-    rs = avg_gain / avg_loss
+    # Wilder's smoothing: subsequent averages use previous values
+    for i in range(window, len(data)):
+        avg_gain[i] = (avg_gain[i - 1] * (window - 1) + gain[i]) / window
+        avg_loss[i] = (avg_loss[i - 1] * (window - 1) + loss[i]) / window
+
+    rs = avg_gain / avg_loss.replace(0, 1e-10)  # Prevent division by zero
     rsi = 100 - (100 / (1 + rs))
+
     return rsi
 
 def play_alert_sound():
-    """Play system alert sound using cross-platform methods"""
+    """Play alert sound using platform-appropriate method"""
     try:
-        import os
-        os.system('osascript -e "beep"')
-    except:
-        print('\a', end='', flush=True)  # Fallback to terminal bell
-
+        system = platform.system()
+        if system == "Windows":
+            import winsound
+            winsound.Beep(1000, 1000)  # Frequency 1000Hz, duration 1000ms
+        elif system == "Darwin":  # macOS
+            subprocess.run(['afplay', '/System/Library/Sounds/Ping.aiff'])
+        elif system == "Linux":
+            subprocess.run(['aplay', '/usr/share/sounds/alsa/Front_Center.wav'])
+    except Exception as e:
+        st.warning(f"Could not play sound: {e}")
 
 def update_stock_data(symbol):
     """Update data for a single stock"""
@@ -238,23 +299,6 @@ def update_stock_data(symbol):
         return False
 
 
-def monitoring_thread(stock_list):
-    """Thread function for continuous monitoring"""
-    while st.session_state.monitor_active:
-        success_count = 0
-        current_time = datetime.now()
-
-        for symbol in stock_list:
-            if update_stock_data(symbol):
-                success_count += 1
-
-        if success_count > 0:
-            st.session_state.last_update = current_time.strftime('%Y-%m-%d %H:%M:%S')
-            time.sleep(2)  # Small delay to allow Streamlit to update
-
-        time.sleep(CHECK_INTERVAL)
-
-
 def start_monitoring(stock_list):
     """Start the monitoring thread"""
     if not st.session_state.monitor_active:
@@ -267,7 +311,6 @@ def start_monitoring(stock_list):
         st.session_state.monitor_thread.start()
         st.toast("Monitoring started!", icon="✅")
 
-
 def stop_monitoring():
     """Stop the monitoring thread"""
     if st.session_state.monitor_active:
@@ -275,7 +318,6 @@ def stop_monitoring():
         if 'monitor_thread' in st.session_state:
             st.session_state.monitor_thread.join(timeout=1)
         st.toast("Monitoring stopped", icon="⏹️")
-
 
 def main():
     st.set_page_config(page_title="Stock RSI Alert Dashboard", layout="wide")
@@ -335,7 +377,7 @@ def main():
             if symbol in processed_stocks:  # Only show currently selected stocks
                 display_data.append({
                     'Symbol': symbol,
-                    'Price': f" Rs {data['price']:.2f}",
+                    'Price': f"Rs {data['price']:.2f}",
                     'RSI': data['rsi'],
                     'Status': "⚠️ ALERT" if data['rsi'] < RSI_THRESHOLD else "✅ Normal",
                     'Last Updated': data['time'].strftime('%Y-%m-%d %H:%M:%S')
@@ -395,7 +437,6 @@ def main():
     # Add some space at the bottom
     st.markdown("---")
     st.caption(f"Note: Data updates every {CHECK_INTERVAL} seconds. Alerts persist for 24 hours.")
-
 
 if __name__ == "__main__":
     main()
